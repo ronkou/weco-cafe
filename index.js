@@ -1,5 +1,6 @@
 // WECO CAFE 后端API服务 - MongoDB版
 // 部署于 Vercel + MongoDB Atlas（免備案、數據持久化）
+// Version: 2026-06-03 - Payment routes fix (lines 972-1047)
 
 import { MongoClient } from 'mongodb';
 import express from 'express';
