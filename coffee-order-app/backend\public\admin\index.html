@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#1a1a1a">
+  <title>WECO CAFE POS</title>
+  <style>
+    /* ===== 移動端視口高度修復（解決 100vh bug 導致內容截斷）===== */
+    html {
+      height: auto;
+      min-height: 100%;
+      /* 動態視口高度，覆蓋移動端地址欄問題 */
+      --vh: 100vh;
+    }
+body {
+  min-height: 100dvh;
+  min-height: calc(var(--vh, 100vh) * 1);
+  height: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  position: relative;
+}
+#app {
+  min-height: 100dvh;
+  min-height: calc(var(--vh, 100vh) * 1);
+  height: auto;
+  overflow: visible;
+}
+  </style>
+
+  <!-- CSS Custom Properties (CSS Variables) fallback for Android < 5 -->
+  <script>
+    // 檢測 CSS 自定義屬性支持，若不支持則直接使用 100vh 代替 calc(var(--vh, 100vh) * 1)
+    if (!window.CSS || !CSS.supports || !CSS.supports('--a', '0')) {
+      // 不支持 CSS 變量，將所有 min-height 改為 100vh
+      document.addEventListener('DOMContentLoaded', function() {
+        var style = document.createElement('style');
+        style.textContent = 'body, #app, .management, .dashboard, .orders-page, .report-page, .pos-order-page, .login-page, .settlement-page { min-height: 100vh !important; height: auto !important; }';
+        document.head.appendChild(style);
+      });
+    }
+  </script>
+  <script type="module" crossorigin src="/admin/assets/index-DtBQUGJ6.js"></script>
+  <link rel="stylesheet" crossorigin href="/admin/assets/index-Cx_opovN.css">
+</head>
+<body>
+  <div id="app">
+    <!-- 初始加载提示，若 Vue 未能啟動則顯示 -->
+    <div id="app-loading" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #f5f5f5; color: #333; font-family: sans-serif; z-index: 9999;">
+      <div style="font-size: 1.2rem; margin-bottom: 1rem;">正在載入 WECO CAFE POS...</div>
+      <div id="app-error" style="display: none; color: #ee0a24; font-size: 0.9rem; max-width: 80%; text-align: center; margin-top: 1rem;"></div>
+      <div style="font-size: 0.8rem; color: #666; margin-top: 2rem;">若此畫面持續超過 10 秒，請檢查網路連線並重新整理頁面。</div>
+    </div>
+  </div>
+
+  <!-- 動態視口高度：修復移動端瀏覽器地址欄導致的 100vh 截斷問題 -->
+  <script>
+    (function() {
+      function setVh() {
+        var vh = window.innerHeight * 0.01;
+        document.documentElement.style.setProperty('--vh', (vh * 100) + 'px');
+      }
+      setVh();
+      window.addEventListener('resize', setVh);
+      window.addEventListener('orientationchange', function() { setTimeout(setVh, 100); });
+    })();
+  </script>
+
+  <!-- 全局錯誤捕捉與用戶提示 -->
+  <script>
+    (function() {
+      // 捕捉未處理的 Promise 錯誤
+      window.addEventListener('unhandledrejection', function(event) {
+        console.error('Unhandled Promise rejection:', event.reason);
+        showError('JavaScript 執行錯誤：' + (event.reason?.message || event.reason || '未知錯誤'));
+      });
+
+      // 捕捉全域 JavaScript 錯誤
+      window.addEventListener('error', function(event) {
+        console.error('Global error:', event.error);
+        showError('頁面載入錯誤：' + (event.error?.message || event.message || '未知錯誤'));
+      });
+
+      // 若 Vue 在 10 秒後仍未啟動，顯示錯誤
+      setTimeout(function() {
+        var appContent = document.querySelector('#app > *:not(#app-loading)');
+        if (!appContent || appContent.children.length === 0) {
+          showError('應用程式載入逾時，請重新整理或檢查網路連線。');
+        }
+      }, 10000);
+
+      function showError(message) {
+        var errorEl = document.getElementById('app-error');
+        if (errorEl) {
+          errorEl.textContent = message;
+          errorEl.style.display = 'block';
+        }
+        // 同時輸出到 console
+        console.error('[POS]', message);
+      }
+    })();
+  </script>
+</body>
+</html>
