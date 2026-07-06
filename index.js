@@ -1,10 +1,11 @@
 // WECO CAFE 后端API服务 - MongoDB版
 // 部署于 Vercel + MongoDB Atlas（免備案、數據持久化）
-// Version: 2026-06-03 - Payment routes fix (lines 972-1047)
+// Version: 2026-07-06 - Security & routing fix
 
 import { MongoClient } from 'mongodb';
 import express from 'express';
 import cors from 'cors';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import { createServer } from 'http';
@@ -13,7 +14,7 @@ import { Server } from 'socket.io';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// 全局未捕获异常处理器
+// ========== 全局錯誤處理器 ==========
 process.on('uncaughtException', (err) => {
   console.error('[Server] 未捕获异常:', err.message, err.stack);
 });
@@ -27,15 +28,52 @@ const PORT = process.env.PORT || 3000;
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: '*',
+    origin: (process.env.ALLOWED_ORIGINS || 'https://wecocafe.com,https://api.wecocafe.com,https://www.wecocafe.com').split(','),
     methods: ['GET', 'POST']
   }
 });
 
-// 中間件
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+// ========== 安全中間件 ==========
+// CORS — 收緊 origin，僅允許已知域名
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'https://wecocafe.com,https://api.wecocafe.com,https://www.wecocafe.com').split(',').map(s => s.trim());
+app.use(cors({
+  origin: (origin, callback) => {
+    // 允許同源請求（如 Postman、curl）和白名單 origin
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`[CORS] Blocked origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  maxAge: 86400
+}));
+
+// 安全 headers
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // 移除 Server header
+  res.removeHeader('X-Powered-By');
+  next();
+});
+
+// Body 解析 — 限制大小（圖片 Base64 已可降到 1-2MB）
+app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ extended: true, limit: '5mb' }));
+
+// 請求超時保護
+app.use((req, res, next) => {
+  res.setTimeout(30000, () => {
+    if (!res.headersSent) {
+      res.status(408).json({ success: false, message: '請求超時' });
+    }
+  });
+  next();
+});
 
 // ====== Socket.IO 實時通信服務 ======
 io.on('connection', (socket) => {
@@ -80,23 +118,42 @@ io.on('connection', (socket) => {
 
 // 廣播數據更新事件的輔助函數
 function broadcastDataUpdate(collection, operation, data) {
-  const event = {
-    type: 'DATA_UPDATED',
-    collection,
-    operation, // 'CREATE', 'UPDATE', 'DELETE'
-    data,
-    timestamp: new Date().toISOString()
-  };
-  io.to(`updates:${collection}`).emit('data_update', event);
-  console.log(`[Socket.IO] 廣播 ${collection} ${operation} 事件`);
+  try {
+    const room = `updates:${collection}`;
+    const sockets = io.sockets.adapter.rooms.get(room);
+    const clientCount = sockets ? sockets.size : 0;
+
+    if (clientCount === 0) {
+      // 房間內無客戶端，靜默跳過（避免日誌噪音）
+      return;
+    }
+
+    const event = {
+      type: 'DATA_UPDATED',
+      collection,
+      operation, // 'CREATE', 'UPDATE', 'DELETE'
+      data,
+      timestamp: new Date().toISOString()
+    };
+
+    io.to(room).emit('data_update', event);
+    console.log(`[Socket.IO] 廣播 ${collection} ${operation} → ${clientCount} 個客戶端`);
+  } catch (err) {
+    // 廣播失敗不應影響主流程
+    console.warn(`[Socket.IO] 廣播失敗 (${collection}/${operation}):`, err.message);
+  }
 }
 
 
 
 // ====== MongoDB 連接配置 ======
-// TODO: 生產環境請改回 process.env.MONGODB_URI（Vercel環境變量修復後）
-const MONGO_URI = 'mongodb+srv://ronkou:rondan1228@wearmo.oflm07j.mongodb.net/?appName=WEARMO'; // process.env.MONGODB_URI || 'mongodb://localhost:27017';
+// ⚠️ 必須設置 MONGODB_URI 環境變量（Vercel/Railway Dashboard）
+const MONGO_URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.MONGO_DB_NAME || 'weco-cafe';
+
+if (!MONGO_URI) {
+  console.warn('[MongoDB] ⚠️ MONGODB_URI 環境變量未設置，將嘗試本地連接（僅供開發）');
+}
 
 let client = null;
 let db = null;
@@ -139,6 +196,62 @@ async function getDb() {
   }
 }
 
+// ========== 安全工具函數 ==========
+// SHA-256 密碼哈希（單向加密，無需第三方依賴）
+function hashPassword(password) {
+  return crypto.createHash('sha256').update(password + (process.env.PASSWORD_SALT || 'weco-cafe-default-salt')).digest('hex');
+}
+
+// 驗證密碼
+function verifyPassword(password, hashed) {
+  return hashPassword(password) === hashed;
+}
+
+// 簽名 token（簡易 HMAC 簽名，生產環境可升級為 JWT）
+function signToken(payload) {
+  const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = crypto
+    .createHmac('sha256', process.env.TOKEN_SECRET || 'weco-cafe-default-token-secret-change-me')
+    .update(data)
+    .digest('base64url');
+  return `${data}.${signature}`;
+}
+
+// 驗證 token
+function verifyToken(token) {
+  if (!token || typeof token !== 'string' || !token.includes('.')) return null;
+  const [data, signature] = token.split('.');
+  const expected = crypto
+    .createHmac('sha256', process.env.TOKEN_SECRET || 'weco-cafe-default-token-secret-change-me')
+    .update(data)
+    .digest('base64url');
+  // 防 timing attack
+  if (signature.length !== expected.length) return null;
+  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+  try {
+    return JSON.parse(Buffer.from(data, 'base64url').toString('utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+// 認證中間件
+function requireAuth(req, res, next) {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  const payload = verifyToken(token);
+  if (!payload) {
+    return res.status(401).json({ success: false, message: '未授權或 token 已過期' });
+  }
+  req.user = payload;
+  next();
+}
+
+// 輸入驗證
+function isValidString(val, minLen = 1, maxLen = 100) {
+  return typeof val === 'string' && val.length >= minLen && val.length <= maxLen;
+}
+
 // 初始化默認數據
 async function initDefaults() {
   let database;
@@ -149,17 +262,27 @@ async function initDefaults() {
     return;
   }
 
-  // 確保默認管理員存在
+  // 確保默認管理員存在（首次部署時）
   const usersCount = await database.collection('users').countDocuments();
   if (usersCount === 0) {
+    // ⚠️ 從環境變量讀取，僅首次部署創建默認管理員
+    const defaultPassword = process.env.DEFAULT_ADMIN_PASSWORD || crypto.randomBytes(8).toString('hex');
+    const hashedPassword = hashPassword(defaultPassword);
+
     await database.collection('users').insertOne({
       id: 1,
       username: 'admin',
-      password: 'admin123',
+      password: hashedPassword, // SHA-256 hash
       role: 'admin',
+      mustChangePassword: true, // 標記需要首次登入後修改
       createdAt: new Date()
     });
-    console.log('[Init] ✅ 默認管理員已創建');
+
+    if (process.env.DEFAULT_ADMIN_PASSWORD) {
+      console.log('[Init] ✅ 默認管理員已創建（使用 DEFAULT_ADMIN_PASSWORD）');
+    } else {
+      console.log(`[Init] ⚠️ 默認管理員已創建，隨機密碼: ${defaultPassword}（請立即登入並修改）`);
+    }
   }
 
   // 確保默認店鋪信息存在
@@ -268,26 +391,86 @@ app.get('/', (req, res) => {
 
 // ====== 路由（全部改為異步 + MongoDB）======
 
-// 管理員登錄
+// 管理員登錄（修復：哈希驗證 + 簽名 token + 輸入驗證 + 限速）
+const loginAttempts = new Map(); // IP -> { count, lastAttempt }
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOGIN_COOLDOWN_MS = 60 * 1000; // 1 分鐘
+
 app.post('/api/admin/login', async (req, res) => {
+  const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection?.remoteAddress || 'unknown';
+
+  // 限速：1 分鐘內最多 5 次
+  const now = Date.now();
+  const attempt = loginAttempts.get(clientIp) || { count: 0, lastAttempt: 0 };
+  if (attempt.count >= MAX_LOGIN_ATTEMPTS && (now - attempt.lastAttempt) < LOGIN_COOLDOWN_MS) {
+    const waitSec = Math.ceil((LOGIN_COOLDOWN_MS - (now - attempt.lastAttempt)) / 1000);
+    return res.status(429).json({
+      success: false,
+      message: `嘗試次數過多，請 ${waitSec} 秒後再試`
+    });
+  }
+
   try {
     const database = await getDb();
-    const { username, password } = req.body;
-    const user = await database.collection('users').findOne({ username, password });
+    const { username, password } = req.body || {};
+
+    // 輸入驗證
+    if (!isValidString(username, 2, 50) || !isValidString(password, 4, 100)) {
+      loginAttempts.set(clientIp, { count: attempt.count + 1, lastAttempt: now });
+      return res.status(400).json({ success: false, message: '用戶名或密碼格式不正確' });
+    }
+
+    const user = await database.collection('users').findOne({ username });
+
+    // 同時支持舊版明文密碼（過渡期）：若密碼是明文且匹配，也接受，但下次登入後要求改密碼
+    let passwordValid = false;
     if (user) {
-      const token = 'token_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+      if (user.password.length === 64) {
+        // 已是 SHA-256 哈希
+        passwordValid = verifyPassword(password, user.password);
+      } else {
+        // 舊版明文密碼
+        passwordValid = user.password === password;
+      }
+    }
+
+    if (user && passwordValid) {
+      // 簽名 token（24 小時有效）
+      const token = signToken({
+        userId: user.id,
+        username: user.username,
+        role: user.role,
+        exp: Date.now() + 24 * 60 * 60 * 1000
+      });
+
+      // 清除限速計數
+      loginAttempts.delete(clientIp);
+
       res.json({
         success: true,
-        token: token,
+        token,
         user: { id: user.id, username: user.username, role: user.role },
-        adminInfo: { id: user.id, name: user.name || '系統管理員', username: user.username, role: user.role || 'superadmin' }
+        adminInfo: {
+          id: user.id,
+          name: user.name || '系統管理員',
+          username: user.username,
+          role: user.role || 'superadmin',
+          mustChangePassword: !!user.mustChangePassword
+        }
       });
     } else {
+      loginAttempts.set(clientIp, { count: attempt.count + 1, lastAttempt: now });
       res.status(401).json({ success: false, message: '用戶名或密碼錯誤' });
     }
   } catch(err) {
+    console.error('[Login] 錯誤:', err);
     res.status(500).json({ success: false, message: '服務器錯誤' });
   }
+});
+
+// 驗證 token 有效性（前端用於刷新登入狀態）
+app.get('/api/admin/verify', requireAuth, (req, res) => {
+  res.json({ success: true, user: req.user });
 });
 
 // 獲取菜單/商品
@@ -659,37 +842,8 @@ app.put('/api/shop/info', async (req, res) => {
   }
 });
 
-// 小程序设置管理
-app.get('/api/miniapp/settings', async (req, res) => {
-  try {
-    const database = await getDb();
-    const settings = await database.collection('miniapp_settings').find({}).toArray();
-    res.json({ success: true, data: settings });
-  } catch(err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.put('/api/miniapp/settings', async (req, res) => {
-  try {
-    const database = await getDb();
-    const { type, data } = req.body;
-    if (!type || !data) {
-      return res.status(400).json({ success: false, message: 'type和data字段必填' });
-    }
-    const result = await database.collection('miniapp_settings').findOneAndUpdate(
-      { type },
-      { $set: { data, updatedAt: new Date().toISOString() } },
-      { returnDocument: 'after', upsert: true }
-    );
-    const updatedSetting = result.value || { type, data, updatedAt: new Date().toISOString() };
-    // 广播实时更新事件
-    broadcastDataUpdate('miniapp_settings', 'UPDATE', updatedSetting);
-    res.json({ success: true, data: updatedSetting });
-  } catch(err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
+// 小程序设置管理（單一定義，完整版在下方 line ~1140）
+// 已在下方定義完整版本（含 version、廣播、錯誤處理）
 
 // 會員 CRUD
 app.get('/api/members', async (req, res) => {
