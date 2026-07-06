@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build output
+dist/
+build/
+*.egg-info/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Playwright
+.playwright-cli/
+# ⚠️ 注意：*.png 不應該全局忽略！
+# 只忽略調試截圖目錄下的 PNG：
+debug_screenshots/
+*.debug.png
+screenshots_tmp/
+*.log
+
+# WorkBuddy
+.workbuddy/
+
+# Backup files
+*.bak
+*.backup
+*sync-conflict*
+admin.bak/
+admin_backup*/
+public/admin_backup*/
+public/admin.bak/
+
+# Lock files (optional - keep if you want reproducible builds)
+# package-lock.json
