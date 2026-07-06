@@ -4,9 +4,34 @@
     {
       "src": "index.js",
       "use": "@vercel/node"
+    },
+    {
+      "src": "pos-admin/package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "dist",
+        "buildCommand": "npm run build",
+        "installCommand": "npm install"
+      }
     }
   ],
   "routes": [
+    {
+      "src": "/admin/(.*)",
+      "dest": "pos-admin/dist/$1"
+    },
+    {
+      "src": "/admin",
+      "dest": "pos-admin/dist/index.html"
+    },
+    {
+      "src": "/assets/(.*)",
+      "dest": "pos-admin/dist/assets/$1"
+    },
+    {
+      "src": "/(api|socket\\.io|admin)(.*)",
+      "dest": "index.js"
+    },
     {
       "src": "/(.*)",
       "dest": "index.js"
