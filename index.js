@@ -252,6 +252,60 @@ function isValidString(val, minLen = 1, maxLen = 100) {
   return typeof val === 'string' && val.length >= minLen && val.length <= maxLen;
 }
 
+// ========== 簡易 Rate Limiting（內存版，無需第三方依賴）==========
+// 用於防止暴力破解、刷單、DoS
+const rateLimitStore = new Map();
+
+function rateLimit({ windowMs = 60000, max = 60, keyFn = (req) => req.ip } = {}) {
+  return (req, res, next) => {
+    try {
+      const key = keyFn(req);
+      const now = Date.now();
+      const entry = rateLimitStore.get(key) || { count: 0, resetAt: now + windowMs };
+
+      // 重置窗口
+      if (now > entry.resetAt) {
+        entry.count = 0;
+        entry.resetAt = now + windowMs;
+      }
+
+      entry.count += 1;
+      rateLimitStore.set(key, entry);
+
+      res.setHeader('X-RateLimit-Limit', max);
+      res.setHeader('X-RateLimit-Remaining', Math.max(0, max - entry.count));
+      res.setHeader('X-RateLimit-Reset', Math.ceil(entry.resetAt / 1000));
+
+      if (entry.count > max) {
+        return res.status(429).json({
+          success: false,
+          message: `請求過於頻繁，請 ${Math.ceil((entry.resetAt - now) / 1000)} 秒後重試`
+        });
+      }
+      next();
+    } catch (err) {
+      // Rate limiting 故障不應阻斷服務
+      console.error('[RateLimit] Error:', err.message);
+      next();
+    }
+  };
+}
+
+// 定時清理過期 entry，避免內存泄漏
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of rateLimitStore.entries()) {
+    if (now > entry.resetAt + 300000) { // 5 分鐘後清理
+      rateLimitStore.delete(key);
+    }
+  }
+}, 60000).unref();
+
+// 預設限制器
+const apiLimiter = rateLimit({ windowMs: 60000, max: 100 });          // 一般 API: 100 req/min
+const strictLimiter = rateLimit({ windowMs: 60000, max: 10 });         // 敏感 API: 10 req/min
+const authLimiter = rateLimit({ windowMs: 300000, max: 5 });           // 登入: 5 req/5min (防暴力破解)
+
 // 初始化默認數據
 async function initDefaults() {
   let database;
@@ -390,6 +444,50 @@ app.get('/', (req, res) => {
 });
 
 // ====== 路由（全部改為異步 + MongoDB）======
+
+// ========== 全局寫入路由保護 ==========
+// 所有非登入的 POST/PUT/DELETE/PATCH 都需要 token + rate limiting
+// 注意：必須在所有寫入路由「之前」聲明
+app.use((req, res, next) => {
+  const writeMethods = ['POST', 'PUT', 'DELETE', 'PATCH'];
+  const isLogin = req.path === '/api/admin/login';
+
+  if (!writeMethods.includes(req.method) || isLogin) {
+    return next();
+  }
+
+  // 認證
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  const payload = verifyToken(token);
+  if (!payload) {
+    return res.status(401).json({ success: false, message: '未授權或 token 已過期（請先登入）' });
+  }
+  req.user = payload;
+
+  // Rate limiting（基於用戶 ID）
+  const rateKey = payload.username || req.ip;
+  const entry = rateLimitStore.get(`write:${rateKey}`) || { count: 0, resetAt: Date.now() + 60000 };
+  const now = Date.now();
+  if (now > entry.resetAt) {
+    entry.count = 0;
+    entry.resetAt = now + 60000;
+  }
+  entry.count += 1;
+  rateLimitStore.set(`write:${rateKey}`, entry);
+
+  res.setHeader('X-RateLimit-Limit', 60);
+  res.setHeader('X-RateLimit-Remaining', Math.max(0, 60 - entry.count));
+
+  if (entry.count > 60) {
+    return res.status(429).json({
+      success: false,
+      message: '寫入操作過於頻繁，請稍後再試'
+    });
+  }
+
+  next();
+});
 
 // 管理員登錄（修復：哈希驗證 + 簽名 token + 輸入驗證 + 限速）
 const loginAttempts = new Map(); // IP -> { count, lastAttempt }
