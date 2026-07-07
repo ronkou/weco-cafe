@@ -17,6 +17,10 @@
   ],
   "routes": [
     {
+      "src": "/assets/(.*)",
+      "dest": "pos-admin/dist/assets/$1"
+    },
+    {
       "src": "/admin/(.*)",
       "dest": "pos-admin/dist/$1"
     },
@@ -25,11 +29,11 @@
       "dest": "pos-admin/dist/index.html"
     },
     {
-      "src": "/assets/(.*)",
-      "dest": "pos-admin/dist/assets/$1"
+      "src": "/api/(.*)",
+      "dest": "index.js"
     },
     {
-      "src": "/(api|socket\\.io|admin)(.*)",
+      "src": "/socket.io/(.*)",
       "dest": "index.js"
     },
     {
